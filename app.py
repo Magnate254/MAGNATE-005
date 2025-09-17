@@ -1,71 +1,147 @@
 import streamlit as st
-from db import init_db
-from utils import add_product, list_products, create_receipt_pdf
-from models import Product, Sale, session
-import datetime
+import sqlite3
+import os
+from datetime import datetime
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 
-st.set_page_config(page_title="MAGNATE POS", page_icon="💳", layout="wide")
+# Register fonts for Unicode support (optional)
+pdfmetrics.registerFont(UnicodeCIDFont('HeiseiKakuGo-W5'))
 
-# Company branding
-st.image("assets/logo.png", width=100)
-st.markdown("## ＭＡＧＮＡＴＥ")
-st.caption("where freedom meets purpose")
-st.write("📍 ROVISTA KENYA | 📞 +254 700 000 000 | ✉️ magnate003@email.com | 🌐 www.magnaterovista.com")
+DB_FILE = "pos.db"
+LOGO_PATH = "assets/logo.png"
 
-# Sidebar navigation
-menu = st.sidebar.radio("Menu", ["Dashboard", "Products", "POS / Sell", "Reports"])
+# ---------- Database Setup ----------
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS products (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name TEXT NOT NULL,
+                 price REAL NOT NULL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS sales (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 product_id INTEGER,
+                 quantity INTEGER,
+                 total REAL,
+                 date TEXT,
+                 FOREIGN KEY(product_id) REFERENCES products(id))''')
+    conn.commit()
+    conn.close()
 
-init_db()
+# ---------- Product Management ----------
+def add_product(name, price):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT INTO products (name, price) VALUES (?, ?)", (name, price))
+    conn.commit()
+    conn.close()
 
-if menu == "Dashboard":
-    st.subheader("📊 Dashboard")
-    sales = session.query(Sale).all()
-    total_sales = sum([s.total_amount for s in sales])
-    st.metric("Total Sales", f"KES {total_sales:.2f}")
-    st.metric("Number of Sales", len(sales))
+def get_products():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT * FROM products")
+    products = c.fetchall()
+    conn.close()
+    return products
 
-elif menu == "Products":
-    st.subheader("📦 Products")
-    with st.form("add_product"):
-        name = st.text_input("Product Name")
-        price = st.number_input("Price (KES)", min_value=0.0, step=0.01)
-        stock = st.number_input("Stock", min_value=0, step=1)
-        submitted = st.form_submit_button("Add Product")
-        if submitted:
-            add_product(name, price, stock)
-            st.success(f"{name} added successfully!")
+# ---------- Sales Management ----------
+def record_sale(product_id, quantity, total):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("INSERT INTO sales (product_id, quantity, total, date) VALUES (?, ?, ?, ?)",
+              (product_id, quantity, total, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.commit()
+    conn.close()
 
-    st.write("### Product List")
-    products = list_products()
-    st.table([{"Name": p.name, "Price": p.price, "Stock": p.stock} for p in products])
+def get_sales():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT s.id, p.name, s.quantity, s.total, s.date FROM sales s JOIN products p ON s.product_id = p.id")
+    sales = c.fetchall()
+    conn.close()
+    return sales
 
-elif menu == "POS / Sell":
-    st.subheader("💳 Point of Sale")
-    products = list_products()
-    cart = []
-    for p in products:
-        qty = st.number_input(f"{p.name} (Stock: {p.stock})", min_value=0, max_value=p.stock, step=1, key=f"cart_{p.id}")
-        if qty > 0:
-            cart.append((p, qty))
+# ---------- Receipt Generator ----------
+def generate_receipt(sale_items, total_amount, discount=0, vat=0.16):
+    filename = f"receipt_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+    doc = SimpleDocTemplate(filename, pagesize=letter)
+    styles = getSampleStyleSheet()
+    story = []
 
-    if st.button("Checkout"):
-        if not cart:
-            st.warning("No items in cart")
-        else:
-            total = sum([p.price * qty for p, qty in cart])
-            sale = Sale(
-                date=datetime.datetime.now(),
-                items=",".join([f"{p.name}x{qty}" for p, qty in cart]),
-                total_amount=total
-            )
-            session.add(sale)
-            for p, qty in cart:
-                p.stock -= qty
-            session.commit()
-            create_receipt_pdf(sale)
-            st.success(f"Sale recorded. Total: KES {total:.2f}. Receipt saved.")
+    if os.path.exists(LOGO_PATH):
+        from reportlab.platypus import Image
+        logo = Image(LOGO_PATH, width=120, height=60)
+        story.append(logo)
+        story.append(Spacer(1, 12))
 
-elif menu == "Reports":
-    st.subheader("📑 Sales Reports")
-    sales = session.query(Sale).all()
-    st.table([{"Date": s.date, "Items": s.items, "Total": s.total_amount} for s in sales])
+    story.append(Paragraph("<b>MAGNATE POS</b>", styles['Title']))
+    story.append(Paragraph("Customer Receipt", styles['Heading2']))
+    story.append(Spacer(1, 12))
+
+    for item in sale_items:
+        story.append(Paragraph(f"{item[1]} x {item[2]} = {item[3]:.2f}", styles['Normal']))
+
+    story.append(Spacer(1, 12))
+
+    discounted_total = total_amount - discount
+    vat_amount = discounted_total * vat
+    final_total = discounted_total + vat_amount
+
+    story.append(Paragraph(f"Subtotal: {total_amount:.2f}", styles['Normal']))
+    story.append(Paragraph(f"Discount: {discount:.2f}", styles['Normal']))
+    story.append(Paragraph(f"VAT (16%): {vat_amount:.2f}", styles['Normal']))
+    story.append(Paragraph(f"<b>Total: {final_total:.2f}</b>", styles['Heading2']))
+
+    doc.build(story)
+    return filename
+
+# ---------- Streamlit App ----------
+def main():
+    st.title("💰 MAGNATE POS SYSTEM")
+
+    menu = ["Products", "Sales", "Reports"]
+    choice = st.sidebar.selectbox("Menu", menu)
+
+    if choice == "Products":
+        st.subheader("Manage Products")
+        with st.form("add_product_form"):
+            name = st.text_input("Product Name")
+            price = st.number_input("Price", min_value=0.0, step=0.01)
+            submitted = st.form_submit_button("Add Product")
+            if submitted and name:
+                add_product(name, price)
+                st.success(f"Added {name} at {price}")
+
+        products = get_products()
+        st.write("### Product List")
+        st.table(products)
+
+    elif choice == "Sales":
+        st.subheader("Record Sale")
+        products = get_products()
+        product_dict = {p[1]: (p[0], p[2]) for p in products}
+        product_name = st.selectbox("Select Product", list(product_dict.keys()))
+        quantity = st.number_input("Quantity", min_value=1, step=1)
+        if st.button("Record Sale"):
+            product_id, price = product_dict[product_name]
+            total = price * quantity
+            record_sale(product_id, quantity, total)
+            st.success(f"Sale recorded: {product_name} x {quantity} = {total:.2f}")
+
+            sale_items = [(product_id, product_name, quantity, total)]
+            receipt = generate_receipt(sale_items, total)
+            with open(receipt, "rb") as f:
+                st.download_button("Download Receipt", f, file_name=receipt)
+
+    elif choice == "Reports":
+        st.subheader("Sales Report")
+        sales = get_sales()
+        st.table(sales)
+
+if __name__ == "__main__":
+    init_db()
+    main()
