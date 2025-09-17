@@ -8,11 +8,10 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 
-# Register fonts for Unicode support (optional)
+# Register Unicode font (so receipts support all characters)
 pdfmetrics.registerFont(UnicodeCIDFont('HeiseiKakuGo-W5'))
 
 DB_FILE = "pos.db"
-LOGO_PATH = "assets/logo.png"
 
 # ---------- Database Setup ----------
 def init_db():
@@ -72,13 +71,7 @@ def generate_receipt(sale_items, total_amount, discount=0, vat=0.16):
     styles = getSampleStyleSheet()
     story = []
 
-    if os.path.exists(LOGO_PATH):
-        from reportlab.platypus import Image
-        logo = Image(LOGO_PATH, width=120, height=60)
-        story.append(logo)
-        story.append(Spacer(1, 12))
-
-    story.append(Paragraph("<b>MAGNATE POS</b>", styles['Title']))
+    story.append(Paragraph("<b>POS RECEIPT</b>", styles['Title']))
     story.append(Paragraph("Customer Receipt", styles['Heading2']))
     story.append(Spacer(1, 12))
 
@@ -101,7 +94,7 @@ def generate_receipt(sale_items, total_amount, discount=0, vat=0.16):
 
 # ---------- Streamlit App ----------
 def main():
-    st.title("💰 MAGNATE POS SYSTEM")
+    st.title("💰 SIMPLE POS SYSTEM")
 
     menu = ["Products", "Sales", "Reports"]
     choice = st.sidebar.selectbox("Menu", menu)
@@ -123,6 +116,10 @@ def main():
     elif choice == "Sales":
         st.subheader("Record Sale")
         products = get_products()
+        if not products:
+            st.warning("⚠️ No products available. Please add products first.")
+            return
+
         product_dict = {p[1]: (p[0], p[2]) for p in products}
         product_name = st.selectbox("Select Product", list(product_dict.keys()))
         quantity = st.number_input("Quantity", min_value=1, step=1)
